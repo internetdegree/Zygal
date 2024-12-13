@@ -1,0 +1,427 @@
+# main.py
+from typing import Dict, List
+import logging
+from solana.rpc.api import Client
+from solana.rpc.commitment import Commitment
+from solana.transaction import Transaction
+from solana.keypair import Keypair
+from datetime import datetime
+import asyncio
+from config import SOLANA_RPC_URL, WALLET_PRIVATE_KEY, DEX_PROGRAMS
+from modules.blockchain_monitor import BlockchainMonitor
+from modules.trading_engine import TradingEngine
+from modules.risk_manager import RiskManager
+from modules.market_analyzer import MarketAnalyzer
+from modules.data_collector import DataCollector
+from modules.dex_interface import DexInterface
+from strategies.strategy_manager import StrategyManager
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class ZygalAI:
+    def __init__(self):
+        self.solana_client = Client(SOLANA_RPC_URL, commitment=Commitment.CONFIRMED)
+        self.wallet = Keypair.from_secret_key(bytes.fromhex(WALLET_PRIVATE_KEY))
+        self.blockchain_monitor = BlockchainMonitor(self.solana_client)
+        self.dex_interface = DexInterface(self.solana_client, self.wallet)
+        self.trading_engine = TradingEngine(self.solana_client, self.dex_interface)
+        self.risk_manager = RiskManager()
+        self.market_analyzer = MarketAnalyzer()
+        self.data_collector = DataCollector()
+        self.strategy_manager = StrategyManager()
+        
+    async def initialize(self):
+        """Initialize all required connections and modules"""
+        logger.info("Initializing Zygal AI...")
+        await self.blockchain_monitor.start()
+        await self.dex_interface.initialize()
+        await self.trading_engine.initialize()
+        await self.market_analyzer.initialize()
+        await self.strategy_manager.initialize()
+        
+    async def run(self):
+        """Main execution loop"""
+        try:
+            await self.initialize()
+            while True:
+                # Collect comprehensive blockchain data
+                blockchain_data = await self.blockchain_monitor.get_latest_data()
+                market_data = await self.data_collector.get_market_data()
+                
+                # Run market analysis with enhanced metrics
+                analysis = await self.market_analyzer.analyze(
+                    blockchain_data,
+                    market_data
+                )
+                
+                # Get strategy recommendations
+                strategies = self.strategy_manager.get_active_strategies()
+                for strategy in strategies:
+                    signals = await strategy.generate_signals(analysis)
+                    
+                    # Validate against risk parameters
+                    if self.risk_manager.validate_trade(signals, analysis):
+                        # Execute validated strategy
+                        await self.trading_engine.execute_strategy(
+                            strategy_signals=signals,
+                            market_analysis=analysis
+                        )
+                
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"Error in main loop: {e}")
+            raise
+
+# modules/blockchain_monitor.py
+from solana.rpc.api import Client
+from typing import Dict, List
+import logging
+import asyncio
+
+logger = logging.getLogger(__name__)
+
+class BlockchainMonitor:
+    def __init__(self, solana_client: Client):
+        self.client = solana_client
+        self.latest_block = None
+        self.monitored_programs = set(DEX_PROGRAMS)
+        self.new_token_cache = {}
+        self.transaction_history = {}
+        
+    async def start(self):
+        """Initialize blockchain monitoring"""
+        try:
+            self.latest_block = await self.client.get_latest_blockhash()
+            asyncio.create_task(self._monitor_new_tokens())
+            asyncio.create_task(self._monitor_transactions())
+            logger.info("Blockchain monitor initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize blockchain monitor: {e}")
+            raise
+            
+    async def _monitor_new_tokens(self):
+        """Monitor for new token deployments"""
+        while True:
+            try:
+                # Monitor token program for new deployments
+                signatures = await self.client.get_signatures_for_address(
+                    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+                )
+                
+                for sig in signatures:
+                    tx_info = await self.client.get_transaction(sig.signature)
+                    if self._is_token_creation(tx_info):
+                        token_data = self._extract_token_data(tx_info)
+                        self.new_token_cache[token_data['address']] = token_data
+                        
+            except Exception as e:
+                logger.error(f"Error monitoring new tokens: {e}")
+                
+            await asyncio.sleep(2)
+            
+    async def _monitor_transactions(self):
+        """Monitor DEX transactions and liquidity changes"""
+        while True:
+            try:
+                for program_id in self.monitored_programs:
+                    signatures = await self.client.get_signatures_for_address(program_id)
+                    for sig in signatures:
+                        if sig.signature not in self.transaction_history:
+                            tx_info = await self.client.get_transaction(sig.signature)
+                            self.transaction_history[sig.signature] = self._analyze_transaction(tx_info)
+                            
+            except Exception as e:
+                logger.error(f"Error monitoring transactions: {e}")
+                
+            await asyncio.sleep(1)
+    
+    def _analyze_transaction(self, tx_info) -> Dict:
+        """Analyze transaction for relevant trading data"""
+        return {
+            'timestamp': tx_info['blockTime'],
+            'type': self._determine_transaction_type(tx_info),
+            'tokens': self._extract_token_transfers(tx_info),
+            'amounts': self._extract_amounts(tx_info),
+            'accounts': self._extract_accounts(tx_info)
+        }
+
+# modules/trading_engine.py
+from typing import Dict, List
+import asyncio
+from decimal import Decimal
+
+class TradingEngine:
+    def __init__(self, solana_client, dex_interface):
+        self.client = solana_client
+        self.dex_interface = dex_interface
+        self.active_trades = {}
+        self.position_manager = PositionManager()
+        
+    async def execute_strategy(self, strategy_signals: Dict, market_analysis: Dict):
+        """Execute trading strategy based on analysis and signals"""
+        try:
+            for signal in strategy_signals['trades']:
+                if signal['action'] == 'BUY':
+                    await self._execute_buy(signal, market_analysis)
+                elif signal['action'] == 'SELL':
+                    await self._execute_sell(signal, market_analysis)
+                    
+        except Exception as e:
+            logger.error(f"Trading execution error: {e}")
+            raise
+            
+    async def _execute_buy(self, signal: Dict, analysis: Dict):
+        """Execute buy order with smart routing"""
+        try:
+            # Get best execution price across DEXes
+            best_route = await self.dex_interface.find_best_route(
+                signal['token_address'],
+                signal['amount'],
+                'BUY'
+            )
+            
+            # Execute trade with slippage protection
+            transaction = await self.dex_interface.create_swap_transaction(
+                best_route,
+                max_slippage=Decimal('0.01')  # 1% max slippage
+            )
+            
+            # Submit and monitor transaction
+            signature = await self.client.send_transaction(transaction)
+            await self._monitor_transaction(signature)
+            
+            # Update position tracking
+            self.position_manager.add_position(signal['token_address'], signal['amount'])
+            
+        except Exception as e:
+            logger.error(f"Buy execution error: {e}")
+            raise
+
+# modules/risk_manager.py
+from typing import Dict
+from decimal import Decimal
+
+class RiskManager:
+    def __init__(self):
+        self.max_position_size = Decimal('0.1')  # 10% of portfolio
+        self.stop_loss_percentage = Decimal('0.05')  # 5% stop loss
+        self.max_drawdown = Decimal('0.20')  # 20% maximum drawdown
+        self.position_limits = {}
+        self.risk_metrics = {}
+        
+    def validate_trade(self, signals: Dict, analysis: Dict) -> bool:
+        """Comprehensive trade validation"""
+        try:
+            # Check portfolio risk metrics
+            if not self._check_portfolio_risk(signals):
+                return False
+                
+            # Validate token-specific risks
+            if not self._validate_token_risk(signals['token_address'], analysis):
+                return False
+                
+            # Check market conditions
+            if not self._validate_market_conditions(analysis):
+                return False
+                
+            # Validate position sizing
+            if not self._validate_position_size(signals['amount']):
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Risk validation error: {e}")
+            return False
+            
+    def _validate_token_risk(self, token_address: str, analysis: Dict) -> bool:
+        """Validate token-specific risk factors"""
+        risk_score = analysis['risk_metrics'].get(token_address, {})
+        
+        # Check liquidity
+        if risk_score.get('liquidity', 0) < self.min_liquidity:
+            return False
+            
+        # Check volatility
+        if risk_score.get('volatility', float('inf')) > self.max_volatility:
+            return False
+            
+        # Check smart contract risk
+        if risk_score.get('contract_risk', float('inf')) > self.max_contract_risk:
+            return False
+            
+        return True
+
+# modules/market_analyzer.py
+from typing import Dict, List
+import numpy as np
+from scipy import stats
+
+class MarketAnalyzer:
+    def __init__(self):
+        self.historical_data = {}
+        self.market_metrics = {}
+        self.sentiment_analyzer = SentimentAnalyzer()
+        
+    async def analyze(self, blockchain_data: Dict, market_data: Dict) -> Dict:
+        """Comprehensive market analysis"""
+        try:
+            # Analyze on-chain metrics
+            chain_metrics = self._analyze_chain_metrics(blockchain_data)
+            
+            # Analyze market metrics
+            market_metrics = self._analyze_market_metrics(market_data)
+            
+            # Analyze social sentiment
+            sentiment_metrics = await self.sentiment_analyzer.analyze()
+            
+            # Combine analyses
+            return {
+                'chain_metrics': chain_metrics,
+                'market_metrics': market_metrics,
+                'sentiment': sentiment_metrics,
+                'risk_metrics': self._calculate_risk_metrics(
+                    chain_metrics,
+                    market_metrics,
+                    sentiment_metrics
+                ),
+                'trading_signals': self._generate_trading_signals(
+                    chain_metrics,
+                    market_metrics,
+                    sentiment_metrics
+                )
+            }
+            
+        except Exception as e:
+            logger.error(f"Analysis error: {e}")
+            raise
+
+# modules/dex_interface.py
+from typing import Dict, List
+from decimal import Decimal
+from solana.rpc.api import Client
+from solana.keypair import Keypair
+
+class DexInterface:
+    def __init__(self, solana_client: Client, wallet: Keypair):
+        self.client = solana_client
+        self.wallet = wallet
+        self.dex_programs = {}
+        self.token_accounts = {}
+        
+    async def initialize(self):
+        """Initialize DEX connections"""
+        # Initialize connections to major Solana DEXes
+        self.dex_programs = {
+            'raydium': await self._initialize_raydium(),
+            'orca': await self._initialize_orca(),
+            'serum': await self._initialize_serum()
+        }
+        
+    async def find_best_route(self, token_address: str, amount: Decimal, side: str) -> Dict:
+        """Find best execution route across DEXes"""
+        routes = []
+        
+        # Check each DEX for best price
+        for dex_name, dex in self.dex_programs.items():
+            try:
+                quote = await self._get_quote(dex, token_address, amount, side)
+                routes.append({
+                    'dex': dex_name,
+                    'quote': quote,
+                    'route': await self._get_route(dex, token_address)
+                })
+            except Exception as e:
+                logger.warning(f"Error getting quote from {dex_name}: {e}")
+                
+        # Return best route based on price and liquidity
+        return self._select_best_route(routes)
+        
+    async def create_swap_transaction(self, route: Dict, max_slippage: Decimal) -> Transaction:
+        """Create swap transaction with selected route"""
+        try:
+            dex = self.dex_programs[route['dex']]
+            
+            # Build transaction with slippage protection
+            transaction = await dex.build_swap_transaction(
+                route['route'],
+                self.wallet.public_key,
+                max_slippage
+            )
+            
+            return transaction
+            
+        except Exception as e:
+            logger.error(f"Error creating swap transaction: {e}")
+            raise
+
+# strategies/strategy_manager.py
+from typing import List
+from .base_strategy import BaseStrategy
+from .momentum_strategy import MomentumStrategy
+from .liquidity_strategy import LiquidityStrategy
+from .social_sentiment_strategy import SocialSentimentStrategy
+from .whale_tracking_strategy import WhaleTrackingStrategy
+
+class StrategyManager:
+    def __init__(self):
+        self.strategies: List[BaseStrategy] = []
+        
+    async def initialize(self):
+        """Initialize trading strategies"""
+        self.strategies = [
+            MomentumStrategy(),
+            LiquidityStrategy(),
+            SocialSentimentStrategy(),
+            WhaleTrackingStrategy()
+        ]
+        
+        for strategy in self.strategies:
+            await strategy.initialize()
+            
+    def get_active_strategies(self) -> List[BaseStrategy]:
+        """Get currently active trading strategies"""
+        return [s for s in self.strategies if s.is_active()]
+
+# strategies/base_strategy.py
+from abc import ABC, abstractmethod
+from typing import Dict
+
+class BaseStrategy(ABC):
+    @abstractmethod
+    async def initialize(self):
+        """Initialize strategy parameters"""
+        pass
+        
+    @abstractmethod
+    async def generate_signals(self, analysis: Dict) -> Dict:
+        """Generate trading signals based on analysis"""
+        pass
+        
+    @abstractmethod
+    def is_active(self) -> bool:
+        """Check if strategy is currently active"""
+        pass
+
+# config.py
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+WALLET_PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY")
+
+# DEX program IDs
+DEX_PROGRAMS = {
+    "RAYDIUM_V4": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+    "ORCA_V2": "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",
+    "SERUM_V3": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+}
+
+# Risk parameters
+RISK_PARAMS = {
+    "MAX_POSITION_SIZE": 0.1,
+    "STOP_LOSS_PERCENTAGE": 0.
